@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>複数画像切替付きスポット案内（自動音声版 + ログ記録）</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body { margin: 0; overflow: hidden; background-color: #000; color: white; font-family: sans-serif; text-align: center; }
+    #camera { width: 100vw; height: 100vh; object-fit: cover; position: absolute; top: 0; left: 0; z-index: -1; }
+    #info { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 8px; z-index: 1; white-space: pre-wrap; }
+    #image { position: absolute; bottom: 180px; left: 50%; transform: translateX(-50%); width: 300px; height: 300px; object-fit: contain; display: none; z-index: 1; background: black; }
+    .btn { position: absolute; left: 50%; transform: translateX(-50%); background-color: #007BFF; color: white; border: none; padding: 10px 20px; font-size: 14px; border-radius: 8px; cursor: pointer; z-index: 2; display: none; }
+    #patternBtn { bottom: 70px; }
+    #nextBtn { bottom: 20px; }
+    #logBtn { bottom: 120px; display:block; } /* ログ記録ボタン */
+    #downloadBtn { bottom: 170px; display:block; } /* CSVダウンロードボタン */
+    .img-nav { position: absolute; bottom: 260px; z-index: 2; font-size: 20px; background: rgba(0,0,0,0.5); color: white; border: none; padding: 5px 15px; cursor: pointer; border-radius: 6px; }
+    #prevBtn { left: 10%; }
+    #nextImgBtn { right: 10%; }
+  </style>
+</head>
+<body>
+
+<video id="camera" autoplay playsinline muted></video>
+<div id="info">位置情報取得中...</div>
+<img id="image" src="" alt="スポット画像" />
+
+<!-- 操作用ボタン -->
+<button class="btn" id="patternBtn" onclick="switchPattern()">English</button>
+<button class="btn" id="nextBtn" onclick="goToNextSpot()">このスポットは完了</button>
+<button class="img-nav" id="prevBtn" onclick="showPrevImage()" style="display:none;">←</button>
+<button class="img-nav" id="nextImgBtn" onclick="showNextImage()" style="display:none;">→</button>
+<button class="btn" id="logBtn" onclick="logCurrentPosition()">位置ログ記録</button>
+<button class="btn" id="downloadBtn" onclick="downloadCSV()">CSVダウンロード</button>
+
+<audio id="audio" src=""></audio>
+
+<script>
+const spots = [
+  { name: "図書館前スロープ", lat: 35.691968142452374, lon: 140.0507643569911, radius: 0, images: ["image0.jpeg", "image1.jpeg"], audio: { A: "spot1.ja.mp3", B: "spot1.en.mp3", C: "spot1.ch.mp3" } }, //スロープ前
+  { name: "１４号館前直進", lat: 35.69245264109913,  lon: 140.05086356956514, radius: 10, images: ["image2.jpeg", "image10.jpeg"], audio: { A: "spot2.ja.mp3", B: "spot2.en.mp3", C: "spot2.ch.mp3" } }, //排水溝の上
+  { name: "曲がり角左", lat:35.69283599175495,  lon:140.05092001888113, radius: 10, images: ["image3.jpeg", "image11.jpeg"], audio: { A: "spot3,4.ja.mp3", B: "spot3,4.en.mp3", C: "spot3,4.ch.mp3" } }, //道の色が変わるところ
+  { name: "曲がり角右１", lat: 35.692909781862724,  lon: 140.05024978654654, radius: 10, images: ["image4.jpeg", "image13.jpeg"], audio: { A: "spot3,4.ja.mp3", B: "spot3,4.en.mp3", C: "spot3,4.ch.mp3" } }, //13号館のちょうど角
+  { name: "曲がり角右２", lat: 35.69334894066289,  lon: 140.05033682451656, radius: 10, images: ["image5.jpeg", "image14.jpeg"], audio: { A: "spot5,6.ja.mp3", B: "spot5,6.en.mp3", C: "spot5,6.ch.mp3" } }, //13号館のちょうど角
+  { name: "曲がり角右３", lat: 35.69331981781718,  lon: 140.05102244720183, radius: 10, images: ["image6.jpeg", "image15.jpeg"], audio: { A: "spot5,6.ja.mp3", B: "spot5,6.en.mp3", C: "spot5,6.ch.mp3" } }, //階段の前の木
+  { name: "目的地", lat: 35.693014464267506,  lon: 140.0509410980045, radius: 10, images: ["image7.jpeg", "image16.jpeg"], audio: { A: "spot7,8.ja.mp3", B: "spot7,8.en.mp3", C: "spot7,8.ch.mp3" } } //T字線の交点
+];
+
+let currentIndex = 0;
+let hasEnteredSpot = false;
+let currentSpot = null;
+let currentPattern = "A";
+let imageIndex = 0;
+
+const camera = document.getElementById("camera");
+const info = document.getElementById("info");
+const image = document.getElementById("image");
+const nextBtn = document.getElementById("nextBtn");
+const patternBtn = document.getElementById("patternBtn");
+const audio = document.getElementById("audio");
+const prevBtn = document.getElementById("prevBtn");
+const nextImgBtn = document.getElementById("nextImgBtn");
+
+navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false })
+  .then(stream => camera.srcObject = stream)
+  .catch(err => alert("カメラへのアクセスに失敗しました: " + err));
+
+function getDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLon/2)**2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+function checkProximity(lat, lon) {
+  if (currentIndex >= spots.length) {
+    info.innerText = "すべてのスポットを通過しました。";
+    hideAllUI();
+    return;
+  }
+  const spot = spots[currentIndex];
+  const distance = getDistance(lat, lon, spot.lat, spot.lon);
+  const range = spot.radius || 10;
+
+  info.innerText =
+    `現在地: 緯度 ${lat.toFixed(6)}, 経度 ${lon.toFixed(6)}\n` +
+    `次のスポット: ${spot.name}（${currentIndex + 1} / ${spots.length}）\n` +
+    `残り距離: ${distance.toFixed(1)}m`;
+
+  if (currentIndex >= 1 && !hasEnteredSpot && distance < range) {
+    showSpot(spot);
+  }
+}
+
+function showSpot(spot) {
+  currentSpot = spot;
+  hasEnteredSpot = true;
+  imageIndex = 0;
+
+  audio.src = spot.audio[currentPattern];
+  image.src = spot.images[imageIndex];
+  image.style.display = "block";
+  nextBtn.style.display = "block";
+  patternBtn.style.display = "block";
+  prevBtn.style.display = spot.images.length > 1 ? "block" : "none";
+  nextImgBtn.style.display = spot.images.length > 1 ? "block" : "none";
+
+  audio.loop = true;
+  audio.play().catch(e => console.log("自動再生に失敗:", e));
+}
+
+function switchPattern() {
+  const patterns = ["A", "B", "C"];
+  const index = patterns.indexOf(currentPattern);
+  currentPattern = patterns[(index + 1) % patterns.length];
+  updatePatternButtonText();
+
+  if (currentSpot) {
+    audio.pause();
+    audio.src = currentSpot.audio[currentPattern];
+    audio.play().catch(e => console.log("自動再生に失敗:", e));
+  }
+}
+
+function showPrevImage() {
+  if (!currentSpot) return;
+  imageIndex = (imageIndex - 1 + currentSpot.images.length) % currentSpot.images.length;
+  image.src = currentSpot.images[imageIndex];
+}
+
+function showNextImage() {
+  if (!currentSpot) return;
+  imageIndex = (imageIndex + 1) % currentSpot.images.length;
+  image.src = currentSpot.images[imageIndex];
+}
+
+function updatePatternButtonText() {
+  let label = "";
+  switch (currentPattern) {
+    case "A": label = "English"; break;
+    case "B": label = "中文"; break;
+    case "C": label = "日本語"; break;
+  }
+  patternBtn.innerText = label;
+}
+
+function goToNextSpot() {
+  audio.pause();
+  currentIndex++;
+  hasEnteredSpot = false;
+  currentSpot = null;
+  hideAllUI();
+}
+
+function hideAllUI() {
+  image.style.display = "none";
+  nextBtn.style.display = "none";
+  patternBtn.style.display = "none";
+  prevBtn.style.display = "none";
+  nextImgBtn.style.display = "none";
+}
+
+/* ---- ✅ ログ機能追加 ---- */
+let logData = [];
+
+function logCurrentPosition() {
+  if (!navigator.geolocation) {
+    alert("位置情報が利用できません");
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(pos => {
+    const lat = pos.coords.latitude;
+    const lon = pos.coords.longitude;
+    const timestamp = new Date().toISOString();
+
+    if (currentIndex >= spots.length) {
+      alert("すべてのスポットを通過しました");
+      return;
+    }
+    const spot = spots[currentIndex];
+    const distance = getDistance(lat, lon, spot.lat, spot.lon).toFixed(2);
+
+    const logEntry = {
+      time: timestamp,
+      lat: lat,
+      lon: lon,
+      nextSpot: spot.name,
+      distance: distance
+    };
+
+    logData.push(logEntry);
+    info.innerText =
+      `📍ログ記録しました\n現在地: ${lat.toFixed(6)}, ${lon.toFixed(6)}\n` +
+      `次のスポット(${spot.name})まで: ${distance}m`;
+
+    console.log("Log Entry:", logEntry);
+  }, err => {
+    alert("現在地の取得に失敗しました: " + err.message);
+  }, { enableHighAccuracy: true });
+}
+
+function downloadCSV() {
+  if (logData.length === 0) {
+    alert("ログがありません");
+    return;
+  }
+
+  let csv = "time,lat,lon,nextSpot,distance(m)\n";
+  logData.forEach(entry => {
+    csv += `${entry.time},${entry.lat},${entry.lon},${entry.nextSpot},${entry.distance}\n`;
+  });
+
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "position_log.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/* ---- ✅ 位置情報監視 ---- */
+if ("geolocation" in navigator) {
+  navigator.geolocation.watchPosition(
+    pos => checkProximity(pos.coords.latitude, pos.coords.longitude),
+    err => info.innerText = "位置情報の取得に失敗しました",
+    { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+  );
+}
+
+window.onload = () => {
+  showSpot(spots[0]); // 起動時に最初のスポットを表示
+  updatePatternButtonText();
+};
+</script>
+
+</body>
+</html>
